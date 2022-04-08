@@ -5,41 +5,114 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/errogaht/toggl-jira-worklog/common"
-	"github.com/errogaht/toggl-jira-worklog/jira"
 	"github.com/errogaht/toggl-jira-worklog/toggl"
 	"io"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
 	"time"
 )
 
-func printHistory(historyLines *[]string, historyFile string) {
-	fmt.Println("7 days history:")
+func main() {
+	config := getConfig()
 
+	fmt.Println("Give me a date, i'll go to Toggle fetch all logs for the day and create work logs in Jira")
+
+	historyLines := loadHistory()
+	printHistory(&historyLines)
+
+	enteredDate := askDate()
+	historyLines = append(historyLines, enteredDate)
+	saveHistory(&historyLines)
+
+	workLogs := getTogglLogs(enteredDate, config)
+	createJiraLogs(workLogs, enteredDate, config)
+}
+
+func jiraLogWork(issueId string, secondsSpent uint32, date string, config *common.Config) {
+	url := config.JiraUrl + "/rest/api/latest/issue/" + issueId + "/worklog"
+
+	reqBody := fmt.Sprintf(`{"started": "%s", "timeSpentSeconds": %d}`, date+"T00:00:00.000+0000", secondsSpent)
+	req, err := http.NewRequest("POST", url, strings.NewReader(reqBody))
+	req.Header.Add("Authorization", "Basic "+common.BasicAuth(config.JiraUsername, config.JiraPassword))
+	req.Header.Add("content-type", "application/json")
+
+	q := req.URL.Query()
+	q.Add("notifyUsers", "0")
+	req.URL.RawQuery = q.Encode()
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			panic(err.Error())
+		}
+	}(resp.Body)
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+		panic(fmt.Sprintf("status code: %d, body: %s", resp.StatusCode, body))
+	}
+}
+
+func printHistory(historyLines *[]string) {
+	fmt.Println("7 days history:")
+	lines := *historyLines
+
+	for i := range lines {
+		fmt.Println(lines[i])
+	}
+}
+
+func getHomeDir() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return homeDir
+}
+
+func getHistoryFilePath() string {
+	homeDir := getHomeDir()
+	return homeDir + "/.toggl-jira-worklog/history"
+}
+func loadHistory() (lines []string) {
+	historyFile := getHistoryFilePath()
 	file, err := os.OpenFile(historyFile, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
-		fmt.Println(err)
+		log.Fatal(err)
 	}
-	defer file.Close()
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(file)
 
 	scanner := bufio.NewScanner(file)
 	scanner.Split(bufio.ScanLines)
 
-	var line string
 	for scanner.Scan() {
-		line = scanner.Text()
-		*historyLines = append(*historyLines, line)
-		fmt.Println(line)
+		lines = append(lines, scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {
 		log.Fatal(err)
 	}
-}
-func debug(f interface{}) {
 
+	return
 }
 
 func askConfigValue(paramName string) (value string) {
@@ -48,36 +121,41 @@ func askConfigValue(paramName string) (value string) {
 	return
 }
 
-func main() {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		log.Fatal(err)
-	}
+func getConfig() *common.Config {
+	var config common.Config
+	homeDir := getHomeDir()
 
 	configPath := homeDir + "/.toggl-jira-worklog"
 
-	err = os.MkdirAll(configPath, 0744)
+	err := os.MkdirAll(configPath, 0744)
 	if err != nil {
-		return
+		log.Fatal(err)
 	}
 	configPath += "/config.json"
 	file, err := os.OpenFile(configPath, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		fmt.Println(err)
 	}
-	defer file.Close()
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(file)
 
 	b := new(strings.Builder)
-	io.Copy(b, file)
+	_, err = io.Copy(b, file)
+	if err != nil {
+		log.Fatal(err)
+	}
 	fileContent := b.String()
 	if fileContent == "" {
 		fileContent = "{}"
 	}
-	var config common.Config
 
 	err = json.Unmarshal([]byte(fileContent), &config)
 	if err != nil {
-		return
+		log.Fatal(err)
 	}
 
 	if config.ToggleToken == "" {
@@ -101,39 +179,28 @@ func main() {
 
 	jsonString, err := json.Marshal(config)
 	if err != nil {
-		return
+		log.Fatal(err)
 	}
 	_, err = file.Seek(0, 0)
 	if err != nil {
-		return
+		log.Fatal(err)
 	}
 	_, err = file.WriteString(string(jsonString))
 	if err != nil {
-		return
+		log.Fatal(err)
 	}
 
-	fmt.Println("Give me a date, i'll go to Toggle fetch all logs for the day and create work logs in Jira")
-
-	var historyLines []string
-	historyFile := homeDir + "/.toggl-jira-worklog/history"
-
-	printHistory(&historyLines, historyFile)
-	enteredDate := askDate()
-	historyLines = append(historyLines, enteredDate)
-	writeHistory(&historyLines, historyFile)
-
-	workLogs := getTogglLogs(enteredDate, &config)
-	createJiraLogs(&workLogs, enteredDate, &config)
+	return &config
 }
 
 func createJiraLogs(workLogs *map[string]uint32, enteredDate string, config *common.Config) {
 	for issueId, seconds := range *workLogs {
 		fmt.Printf("%d sec. -> %s\n", seconds, issueId)
-		jira.LogWork(issueId, seconds, enteredDate, config)
+		jiraLogWork(issueId, seconds, enteredDate, config)
 	}
 }
 
-func getTogglLogs(enteredDate string, config *common.Config) map[string]uint32 {
+func getTogglLogs(enteredDate string, config *common.Config) *map[string]uint32 {
 	togglLogs := toggl.Report(enteredDate, config)
 
 	workLogs := make(map[string]uint32)
@@ -145,16 +212,17 @@ func getTogglLogs(enteredDate string, config *common.Config) map[string]uint32 {
 		}
 		workLogs[result[1]] = togglLog.Seconds
 	}
-	return workLogs
+	return &workLogs
 }
 
-func writeHistory(historyLinesPointer *[]string, historyFile string) {
-	historyLines := *historyLinesPointer
-	if len(historyLines) >= 7 {
-		historyLines = historyLines[len(historyLines)-7:]
+func saveHistory(historyLinesPointer *[]string) {
+	historyFile := getHistoryFilePath()
+	lines := *historyLinesPointer
+	if len(lines) >= 7 {
+		lines = lines[len(lines)-7:]
 	}
 
-	if err := ioutil.WriteFile(historyFile, []byte(strings.Join(historyLines, "\n")), 0666); err != nil {
+	if err := ioutil.WriteFile(historyFile, []byte(strings.Join(lines, "\n")), 0666); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -162,12 +230,16 @@ func writeHistory(historyLinesPointer *[]string, historyFile string) {
 func askDate() string {
 	var enteredDate string
 	fmt.Println("Enter date yyyy-mm-dd:")
-	fmt.Scan(&enteredDate)
+	_, err := fmt.Scan(&enteredDate)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	d, err := time.Parse("2006-01-02", enteredDate)
 	if err != nil {
-		panic(err.Error())
+		log.Fatal(err)
 	}
 	enteredDate = d.Format("2006-01-02")
+
 	return enteredDate
 }
