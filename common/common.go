@@ -9,6 +9,7 @@ type Config struct {
 	JiraUsername      string
 	JiraPassword      string
 	JiraUrl           string
+	ToggleProjectId   string `json:"ToggleProjectId"`
 }
 
 func BasicAuth(username, password string) string {

@@ -3,9 +3,8 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
-	"github.com/errogaht/toggl-jira-worklog/common"
-	"github.com/errogaht/toggl-jira-worklog/toggl"
 	"io"
 	"io/ioutil"
 	"log"
@@ -14,10 +13,21 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/errogaht/toggl-jira-worklog/common"
+	"github.com/errogaht/toggl-jira-worklog/toggl"
 )
 
 func main() {
+	monthlyReport := flag.Bool("monthly-report", false, "Show monthly report for the current year")
+	flag.Parse()
+
 	config := getConfig()
+
+	if *monthlyReport {
+		generateMonthlyReport(config)
+		return
+	}
 
 	fmt.Println("Give me a date, i'll go to Toggle fetch all logs for the day and create work logs in Jira")
 
@@ -242,4 +252,62 @@ func askDate() string {
 	enteredDate = d.Format("2006-01-02")
 
 	return enteredDate
+}
+
+func generateMonthlyReport(config *common.Config) {
+	now := time.Now()
+	year := now.Year()
+	if now.Month() == 1 && now.Day() == 1 {
+		year-- // handle edge case for Jan 1st
+	}
+
+	fmt.Printf("Monthly work report for %d\n", year)
+	fmt.Println("Month | Required | Worked | Balance")
+	fmt.Println("--------------------------------------")
+
+	totalRequired := 0
+	totalWorked := 0
+
+	for month := 1; month <= int(now.Month()); month++ {
+		start := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
+		end := start.AddDate(0, 1, -1)
+		if month == int(now.Month()) {
+			end = now
+		}
+
+		workingDays := 0
+		for d := start; d.Before(end) || d.Equal(end); d = d.AddDate(0, 0, 1) {
+			if d.Weekday() >= time.Monday && d.Weekday() <= time.Friday {
+				workingDays++
+			}
+		}
+		required := workingDays * 8 * 3600
+		logs := toggl.ReportRange(start.Format("2006-01-02"), end.Format("2006-01-02"), config)
+		worked := 0
+		for _, log := range logs {
+			worked += int(log.Seconds)
+		}
+		balance := worked - required
+		totalRequired += required
+		totalWorked += worked
+
+		fmt.Printf("%5s | %7s | %6s | %+7s\n",
+			start.Format("Jan"),
+			secondsToHoursMinutes(required),
+			secondsToHoursMinutes(worked),
+			secondsToHoursMinutes(balance),
+		)
+	}
+	fmt.Println("--------------------------------------")
+	fmt.Printf("Total | %7s | %6s | %+7s\n",
+		secondsToHoursMinutes(totalRequired),
+		secondsToHoursMinutes(totalWorked),
+		secondsToHoursMinutes(totalWorked-totalRequired),
+	)
+}
+
+func secondsToHoursMinutes(seconds int) string {
+	h := seconds / 3600
+	m := (seconds % 3600) / 60
+	return fmt.Sprintf("%dh %02dm", h, m)
 }
