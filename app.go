@@ -272,7 +272,7 @@ func generateMonthlyReport(config *common.Config) {
 		start := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
 		end := start.AddDate(0, 1, -1)
 		if month == int(now.Month()) {
-			end = now
+			end = now.AddDate(0, 0, -1) // exclude today
 		}
 
 		workingDays := 0
